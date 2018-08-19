@@ -1,0 +1,264 @@
+---
+title: "VAR Models for Macroeconomic Forecasting"
+output: pdf_document
+---
+
+VAR models are interesting econometric tool for explaining how different time series are influenced by each other, and are a very useful tool for econometric forecasting. They can often help answer the question: given a sudden change in one time series, how might others respond, given how they have behaved with each other in the past?
+
+Let's start as always by importing some packages we'll need along the way:
+
+```{r message=FALSE}
+require( dplyr )
+require( lubridate )
+require( fImport )
+require( vars )
+```
+
+# Gathering the Data
+
+The first step here is to collect the historical macroeconomic data that we'll need.
+
+```{r}
+CPI.Data      = read.csv( 'CPIAUCSL.csv' , header = TRUE )
+FEDFUNDS.Data = read.csv( 'FEDFUNDS.csv' , header = TRUE )
+UNRATE.Data   = read.csv( 'UNRATE.csv'   , header = TRUE ) 
+```
+
+Import the data from CSVs that we downloaded from the FRED webpage, and then join them together. To limit our time range we also extract only the window since January 2007.
+
+```{r , warning=FALSE}
+
+Joined.Data = 
+  CPI.Data %>%
+  left_join( FEDFUNDS.Data , by = 'DATE'  ) %>%
+  left_join( UNRATE.Data   , by = 'DATE' ) %>%
+  na.omit %>%
+  mutate( Format_Date = as.Date( as.character( DATE ) ) ) %>%
+  dplyr::filter( Format_Date >= as.Date( '1965-01-01' ) ) %>%
+  dplyr::select( -one_of( c( 'DATE' , 'Format_Date'  ) ) )
+
+head( Joined.Data )
+
+```
+
+# Fitting the VAR Model
+
+Next we can use the VARselect() function from the vars package, which will help us identify the optimal lag according to a number of different criterion:
+
+```{r}
+
+VAR.Leg.Recommendations <- VARselect( Joined.Data , lag.max=12, type="const")
+
+VAR.Leg.Recommendations$selection
+
+```
+
+For this exercise we'll choose to fit the VAR according to the third option, where SC stands for the Scwarz Criterion. And so you can see in the next chunk that when we fit the VAR model, we set the numbers of lags, p, to be equal to the numbers of lags recommended by SC above:
+
+```{r}
+VAR.Fitted.Model <- VAR( Joined.Data, p = VAR.Leg.Recommendations$selection[3] , type="const" )
+
+options( show.signif.stars = FALSE )
+
+summary( VAR.Fitted.Model )
+
+```
+
+Notice the equations given for each variable in the summary output, because this is one of the elements that I like about the VAR model for explaining and forecasting time series: each variable is a function of both itself and all other variables in the system over the last several time periods. Intuitively, this makes sense and helps us tell a story:
+
+Said in words, our VAR model is saying that the unemployment rate this month is both a function of all other variables last month AND the month before that AND the month before that. The same can be said for any of the other variables in the system.
+
+# Impulse Response Functions
+
+The IRF or impulse response function allows us to see the change in the system from an impulse response (aka a "shock") in a given variable. So we shock one variable and can watch how the others respond.
+
+```{r}
+
+months.ahead = 12
+
+UNRATE.Shock.Object = irf( VAR.Fitted.Model , impusle = "UNRATE" , n.ahead = months.ahead  )
+
+UNRATE.Shock.Object$irf$UNRATE
+``` 
+
+The data contained in the IRF object is in relative terms, meaning that each of those numbers is an addition to its last value. So we can make some casual observations from this output -- as UNRATE is shocked upwards or increases (all the numbers in the UNRATE column are positive), then the other two time series typically lower (the changes in the FEDFUNDS and CPI columns are both mostly negative).
+
+We can also do some conversion of these relatives changes into absolute levels, in order to make this a more useful forecasting tool:
+
+```{r}
+
+Upper.IRF.Levels = 
+  tail( Joined.Data , 1 ) %>%
+  rbind( UNRATE.Shock.Object$Upper$UNRATE ) %>%
+  lapply( FUN = function(x){ c( x[1] , x[2:length(x)] + x[1] )  } )
+
+Middle.IRF.Levels = 
+  tail( Joined.Data , 1 ) %>%
+  rbind( UNRATE.Shock.Object$irf$UNRATE ) %>%
+  lapply( FUN = function(x){ c( x[1] , x[2:length(x)] + x[1] )  } )
+
+Lower.IRF.Levels = 
+  tail( Joined.Data , 1 ) %>%
+  rbind( UNRATE.Shock.Object$Lower$UNRATE ) %>%
+  lapply( FUN = function(x){ c( x[1] , x[2:length(x)] + x[1] )  } )
+```
+
+With that done we can go ahead and plot the results -- let's do it first for our shocked variable, the Unemployment Rate:
+
+```{r}
+x.sequence = 0:(months.ahead+1) - 1
+
+ylim = c( 3.8 , 4.2 )
+
+plot( y = Upper.IRF.Levels$UNRATE
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+polygon( x = c( x.sequence , rev( x.sequence ) )
+         , y = c( Upper.IRF.Levels$UNRATE , rev( Lower.IRF.Levels$UNRATE ) )
+         , border = NA
+         , col = 'lightgrey'
+)
+
+par( new = TRUE )
+
+plot( y = Middle.IRF.Levels$UNRATE
+      , x = x.sequence
+      , col = 'darkblue'
+      , type = 'l', lty = 1, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+par( new= TRUE )
+
+plot( y = Lower.IRF.Levels$UNRATE
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+abline( h = head( Middle.IRF.Levels$UNRATE , 1 ) , lwd = 1 , lty = 3 , col = 'gray' )
+
+mtext( text = 'Unemployment Rate (%)' , side = 2 , line = 3 )
+y.marks = seq( from = ylim[1] , to = ylim[2] , by = 0.1 )
+axis( side = 2 , at = y.marks , labels = paste0( y.marks , '%') )
+
+mtext( text = 'Months Since Shock' , side = 1 , line = 3 )
+axis( side = 1 , at = x.sequence , labels = x.sequence )
+```
+
+Now let's do it for the other variables:
+
+```{r , echo = FALSE }
+
+ylim = c( 249.8 , 250.1 )
+
+plot( y = Upper.IRF.Levels$CPIAUCSL
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+polygon( x = c( x.sequence , rev( x.sequence ) )
+         , y = c( Upper.IRF.Levels$CPIAUCSL , rev( Lower.IRF.Levels$CPIAUCSL ) )
+         , border = NA
+         , col = 'lightgrey'
+)
+
+par( new = TRUE )
+
+plot( y = Middle.IRF.Levels$CPIAUCSL
+      , x = x.sequence
+      , col = 'lightblue'
+      , type = 'l', lty = 1, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+par( new= TRUE )
+
+plot( y = Lower.IRF.Levels$CPIAUCSL
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+abline( h = head( Middle.IRF.Levels$CPIAUCSL , 1 ) , lwd = 1 , lty = 3 , col = 'gray' )
+
+mtext( text = 'Consumer Price Index' , side = 2 , line = 3 )
+y.marks = seq( from = ylim[1] , to = ylim[2] , by = 0.1 )
+axis( side = 2 , at = y.marks , labels = paste0( y.marks ) )
+
+mtext( text = 'Months Since Shock' , side = 1 , line = 3 )
+axis( side = 1 , at = x.sequence , labels = x.sequence )
+```
+
+
+```{r , echo=FALSE}
+
+ylim = c( 1.4 , 1.7 )
+
+plot( y = Upper.IRF.Levels$FEDFUNDS
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+polygon( x = c( x.sequence , rev( x.sequence ) )
+         , y = c( Upper.IRF.Levels$FEDFUNDS , rev( Lower.IRF.Levels$FEDFUNDS ) )
+         , border = NA
+         , col = 'lightgrey'
+)
+
+par( new = TRUE )
+
+plot( y = Middle.IRF.Levels$FEDFUNDS
+      , x = x.sequence
+      , col = 'darkred'
+      , type = 'l', lty = 1, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+par( new= TRUE )
+
+plot( y = Lower.IRF.Levels$FEDFUNDS
+      , x = x.sequence
+      , col = 'darkgray'
+      , type = 'l', lty = 2, lwd = 3
+      , xlab = NA , xaxt = 'n'
+      , ylim = ylim, ylab = NA , yaxt = 'n'
+)
+
+abline( h = head( Middle.IRF.Levels$FEDFUNDS , 1 ) , lwd = 1 , lty = 3 , col = 'gray' )
+
+mtext( text = 'Effective Federal Funds Rate (%)' , side = 2 , line = 3 )
+y.marks = seq( from = ylim[1] , to = ylim[2] , by = 0.1 )
+axis( side = 2 , at = y.marks , labels = paste0( y.marks ) )
+
+mtext( text = 'Months Since Shock' , side = 1 , line = 3 )
+axis( side = 1 , at = x.sequence , labels = x.sequence )
+```
+
+Here we see a response close to what most might expect, in that as unemployment rises:
+
+* The Federal Funds rate declines, as the FED lowers rates to stimulate growth.
+
+* The Consumer Price Index (CPI) decreases. Lower employment results in less pressure to increase consumer prices.
+
+# Conclusion
+
+Here we've demonstrated how to use a VAR model in order to conduct a sort of macroecnomic sensitivity analysis. This type of model is useful because of its practicality (it is calibrated based on historical data and is therefore representative of real observed relationship), and also because of its versatility (we used three variables here, but many more time series can be added to the system, depending on the sensitivities you are interested in testing).
